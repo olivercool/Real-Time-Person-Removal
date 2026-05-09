@@ -16,7 +16,8 @@
  */
 
 /********************************************************************
- * Real-Time-Person-Removal Created by Jason Mayes 2020.
+ * Real-Time-Chair-Removal Created by Jason Mayes 2020.
+ * Modified for chair detection using Teachable Machine.
  *
  * Get latest code on my Github:
  * https://github.com/jasonmayes/Real-Time-Person-Removal
@@ -31,148 +32,41 @@ const liveView = document.getElementById('liveView');
 const demosSection = document.getElementById('demos');
 const DEBUG = false;
 
+// Teachable Machine model URL
+const URL = "https://teachablemachine.withgoogle.com/models/VFee0ob5j/";
 
-// An object to configure parameters to set for the bodypix model.
-// See github docs for explanations.
-const bodyPixProperties = {
-  architecture: 'MobileNetV1',
-  outputStride: 16,
-  multiplier: 0.75,
-  quantBytes: 4
-};
+let model, labelContainer, maxPredictions;
+var modelHasLoaded = false;
 
-// An object to configure parameters for detection. I have raised
-// the segmentation threshold to 90% confidence to reduce the
-// number of false positives.
-const segmentationProperties = {
-  flipHorizontal: false,
-  internalResolution: 'high',
-  segmentationThreshold: 0.9,
-  scoreThreshold: 0.2
-};
-
-
-// Render returned segmentation data to a given canvas context.
-function processSegmentation(canvas, segmentation) {
-  var ctx = canvas.getContext('2d');
-  console.log(segmentation)
-  // Get data from our overlay canvas which is attempting to estimate background.
-  var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  var data = imageData.data;
+// Load the model from Teachable Machine
+async function loadModel() {
+  const modelURL = URL + "model.json";
+  const metadataURL = URL + "metadata.json";
   
-  // Get data from the live webcam view which has all data.
-  var liveData = videoRenderCanvasCtx.getImageData(0, 0, canvas.width, canvas.height);
-  var dataL = liveData.data;
-   
-  var minX = 100000;
-  var minY = 100000;
-  var maxX = 0;
-  var maxY = 0;
-  
-  var foundBody = false;
-  
-  // Go through pixels and figure out bounding box of body pixels.
-  for (let x = 0; x < canvas.width; x++) {
-    for (let y = 0; y < canvas.height; y++) {
-      let n = y * canvas.width + x;
-      // Human pixel found. Update bounds.
-      if (segmentation.data[n] !== 0) {
-        if(x < minX) {
-          minX = x;
-        }
-        
-        if(y < minY) {
-          minY = y;
-        }
-        
-        if(x > maxX) {
-          maxX = x;
-        }
-        
-        if(y > maxY) {
-          maxY = y;
-        }
-        foundBody = true;
-      }
-    } 
-  }
-  
-  // Calculate dimensions of bounding box.
-  var width = maxX - minX;
-  var height = maxY - minY;
-  
-  // Define scale factor to use to allow for false negatives around this region.
-  var scale = 1.3;
-
-  //  Define scaled dimensions.
-  var newWidth = width * scale;
-  var newHeight = height * scale;
-
-  // Caculate the offset to place new bounding box so scaled from center of current bounding box.
-  var offsetX = (newWidth - width) / 2;
-  var offsetY = (newHeight - height) / 2;
-
-  var newXMin = minX - offsetX;
-  var newYMin = minY - offsetY;
-  
-  
-  // Now loop through update backgound understanding with new data
-  // if not inside a bounding box.
-  for (let x = 0; x < canvas.width; x++) {
-    for (let y = 0; y < canvas.height; y++) {
-      // If outside bounding box and we found a body, update background.
-      if (foundBody && (x < newXMin || x > newXMin + newWidth) || ( y < newYMin || y > newYMin + newHeight)) {
-        // Convert xy co-ords to array offset.
-        let n = y * canvas.width + x;
-
-        data[n * 4] = dataL[n * 4];
-        data[n * 4 + 1] = dataL[n * 4 + 1];
-        data[n * 4 + 2] = dataL[n * 4 + 2];
-        data[n * 4 + 3] = 255;            
-
-      } else if (!foundBody) {
-        // No body found at all, update all pixels.
-        let n = y * canvas.width + x;
-        data[n * 4] = dataL[n * 4];
-        data[n * 4 + 1] = dataL[n * 4 + 1];
-        data[n * 4 + 2] = dataL[n * 4 + 2];
-        data[n * 4 + 3] = 255;    
-      }
-    }
-  }
-
-  ctx.putImageData(imageData, 0, 0);
-  
-  if (DEBUG) {
-    ctx.strokeStyle = "#00FF00"
-    ctx.beginPath();
-    ctx.rect(newXMin, newYMin, newWidth, newHeight);
-    ctx.stroke();
+  try {
+    model = await tmImage.load(modelURL, metadataURL);
+    maxPredictions = model.getTotalClasses();
+    modelHasLoaded = true;
+    console.log("Model loaded successfully!");
+    console.log("Number of classes:", maxPredictions);
+    
+    // Show demo section now model is ready to use
+    demosSection.classList.remove('invisible');
+  } catch (error) {
+    console.error("Failed to load model:", error);
   }
 }
 
-
-
-// Let's load the model with our parameters defined above.
-// Before we can use bodypix class we must wait for it to finish
-// loading. Machine Learning models can be large and take a moment to
-// get everything needed to run.
-var modelHasLoaded = false;
-var model = undefined;
-
-model = bodyPix.load(bodyPixProperties).then(function (loadedModel) {
-  model = loadedModel;
-  modelHasLoaded = true;
-  // Show demo section now model is ready to use.
-  demosSection.classList.remove('invisible');
+// Initialize the model on page load
+window.addEventListener('load', function() {
+  loadModel();
 });
-
 
 /********************************************************************
 // Continuously grab image from webcam stream and classify it.
 ********************************************************************/
 
-var previousSegmentationComplete = true;
+var previousDetectionComplete = true;
 
 // Check if webcam access is supported.
 function hasGetUserMedia() {
@@ -180,29 +74,88 @@ function hasGetUserMedia() {
     navigator.mediaDevices.getUserMedia);
 }
 
+// Process chair detection and update background
+function processChairDetection(canvas, predictions) {
+  var ctx = canvas.getContext('2d');
+  
+  // Get data from our overlay canvas which is attempting to estimate background.
+  var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  var data = imageData.data;
+  
+  // Get data from the live webcam view which has all data.
+  var liveData = videoRenderCanvasCtx.getImageData(0, 0, canvas.width, canvas.height);
+  var dataL = liveData.data;
+  
+  // Find chair confidence (class 0 is "Chair", class 1 is "Background")
+  let chairConfidence = 0;
+  let chairIndex = -1;
+  
+  for (let i = 0; i < predictions.length; i++) {
+    if (predictions[i].className === "Chair") {
+      chairConfidence = predictions[i].probability;
+      chairIndex = i;
+      break;
+    }
+  }
+  
+  // Update predictions display
+  for (let i = 0; i < maxPredictions; i++) {
+    const classPrediction = predictions[i].className + ": " + predictions[i].probability.toFixed(4);
+    if (labelContainer.childNodes[i]) {
+      labelContainer.childNodes[i].innerHTML = classPrediction;
+    }
+  }
+  
+  // If chair is detected with high confidence, learn the background
+  if (chairConfidence > 0.5) {
+    // Update background from non-chair regions
+    for (let i = 0; i < data.length; i += 4) {
+      // Copy from live data to background model
+      data[i] = dataL[i];         // R
+      data[i + 1] = dataL[i + 1]; // G
+      data[i + 2] = dataL[i + 2]; // B
+      data[i + 3] = 255;          // A
+    }
+  } else {
+    // No chair detected, update all pixels as background
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = dataL[i];         // R
+      data[i + 1] = dataL[i + 1]; // G
+      data[i + 2] = dataL[i + 2]; // B
+      data[i + 3] = 255;          // A
+    }
+  }
+  
+  ctx.putImageData(imageData, 0, 0);
+}
 
-// This function will repeatidly call itself when the browser is ready to process
+// This function will repeatedly call itself when the browser is ready to process
 // the next frame from webcam.
-function predictWebcam() {
-  if (previousSegmentationComplete) {
-    // Copy the video frame from webcam to a tempory canvas in memory only (not in the DOM).
+async function predictWebcam() {
+  if (previousDetectionComplete && modelHasLoaded) {
+    // Copy the video frame from webcam to a temporary canvas in memory only (not in the DOM).
     videoRenderCanvasCtx.drawImage(video, 0, 0);
-    previousSegmentationComplete = false;
-    // Now classify the canvas image we have available.
-    model.segmentPerson(videoRenderCanvas, segmentationProperties).then(function(segmentation) {
-      processSegmentation(webcamCanvas, segmentation);
-      previousSegmentationComplete = true;
-    });
+    previousDetectionComplete = false;
+    
+    try {
+      // Get predictions from the model
+      const predictions = await model.predict(videoRenderCanvas);
+      processChairDetection(webcamCanvas, predictions);
+    } catch (error) {
+      console.error("Prediction error:", error);
+    }
+    
+    previousDetectionComplete = true;
   }
 
   // Call this function again to keep predicting when the browser is ready.
   window.requestAnimationFrame(predictWebcam);
 }
 
-
 // Enable the live webcam view and start classification.
 function enableCam(event) {
   if (!modelHasLoaded) {
+    console.warn("Model is not loaded yet");
     return;
   }
   
@@ -224,8 +177,7 @@ function enableCam(event) {
       webcamCanvas.height = video.videoHeight;
       videoRenderCanvas.width = video.videoWidth;
       videoRenderCanvas.height = video.videoHeight;
-      bodyPixCanvas.width = video.videoWidth;
-      bodyPixCanvas.height = video.videoHeight;
+      
       let webcamCanvasCtx = webcamCanvas.getContext('2d');
       webcamCanvasCtx.drawImage(video, 0, 0);
     });
@@ -233,11 +185,12 @@ function enableCam(event) {
     video.srcObject = stream;
     
     video.addEventListener('loadeddata', predictWebcam);
+  }).catch(function(err) {
+    console.error("Error accessing webcam:", err);
   });
 }
 
-
-// We will create a tempory canvas to render to store frames from 
+// We will create a temporary canvas to render to store frames from 
 // the web cam stream for classification.
 var videoRenderCanvas = document.createElement('canvas');
 var videoRenderCanvasCtx = videoRenderCanvas.getContext('2d');
@@ -247,13 +200,11 @@ var webcamCanvas = document.createElement('canvas');
 webcamCanvas.setAttribute('class', 'overlay');
 liveView.appendChild(webcamCanvas);
 
-// Create a canvas to render ML findings from to manipulate.
-var bodyPixCanvas = document.createElement('canvas');
-bodyPixCanvas.setAttribute('class', 'overlay');
-var bodyPixCanvasCtx = bodyPixCanvas.getContext('2d');
-bodyPixCanvasCtx.fillStyle = '#FF0000';
-
-liveView.appendChild(bodyPixCanvas);
+// Setup label container for predictions
+labelContainer = document.getElementById('label-container');
+for (let i = 0; i < maxPredictions; i++) {
+  labelContainer.appendChild(document.createElement('div'));
+}
 
 // If webcam supported, add event listener to button for when user
 // wants to activate it.
