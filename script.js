@@ -38,6 +38,16 @@ const URL = "https://teachablemachine.withgoogle.com/models/VFee0ob5j/";
 let model, labelContainer, maxPredictions;
 var modelHasLoaded = false;
 
+// We will create a temporary canvas to render to store frames from 
+// the web cam stream for classification.
+var videoRenderCanvas = document.createElement('canvas');
+var videoRenderCanvasCtx = videoRenderCanvas.getContext('2d');
+
+// Lets create a canvas to render our findings to the DOM.
+var webcamCanvas = document.createElement('canvas');
+webcamCanvas.setAttribute('class', 'overlay');
+liveView.appendChild(webcamCanvas);
+
 // Load the model from Teachable Machine
 async function loadModel() {
   const modelURL = URL + "model.json";
@@ -49,6 +59,12 @@ async function loadModel() {
     modelHasLoaded = true;
     console.log("Model loaded successfully!");
     console.log("Number of classes:", maxPredictions);
+    
+    // Setup label container for predictions
+    labelContainer = document.getElementById('label-container');
+    for (let i = 0; i < maxPredictions; i++) {
+      labelContainer.appendChild(document.createElement('div'));
+    }
     
     // Show demo section now model is ready to use
     demosSection.classList.remove('invisible');
@@ -106,9 +122,9 @@ function processChairDetection(canvas, predictions) {
     }
   }
   
-  // If chair is detected with high confidence, learn the background
-  if (chairConfidence > 0.5) {
-    // Update background from non-chair regions
+  // If chair is NOT detected (high background confidence), learn the background
+  if (chairConfidence < 0.5) {
+    // Update background from current frame
     for (let i = 0; i < data.length; i += 4) {
       // Copy from live data to background model
       data[i] = dataL[i];         // R
@@ -116,15 +132,9 @@ function processChairDetection(canvas, predictions) {
       data[i + 2] = dataL[i + 2]; // B
       data[i + 3] = 255;          // A
     }
-  } else {
-    // No chair detected, update all pixels as background
-    for (let i = 0; i < data.length; i += 4) {
-      data[i] = dataL[i];         // R
-      data[i + 1] = dataL[i + 1]; // G
-      data[i + 2] = dataL[i + 2]; // B
-      data[i + 3] = 255;          // A
-    }
   }
+  // If chair is detected, display the learned background instead
+  // (data already contains the learned background)
   
   ctx.putImageData(imageData, 0, 0);
 }
@@ -188,22 +198,6 @@ function enableCam(event) {
   }).catch(function(err) {
     console.error("Error accessing webcam:", err);
   });
-}
-
-// We will create a temporary canvas to render to store frames from 
-// the web cam stream for classification.
-var videoRenderCanvas = document.createElement('canvas');
-var videoRenderCanvasCtx = videoRenderCanvas.getContext('2d');
-
-// Lets create a canvas to render our findings to the DOM.
-var webcamCanvas = document.createElement('canvas');
-webcamCanvas.setAttribute('class', 'overlay');
-liveView.appendChild(webcamCanvas);
-
-// Setup label container for predictions
-labelContainer = document.getElementById('label-container');
-for (let i = 0; i < maxPredictions; i++) {
-  labelContainer.appendChild(document.createElement('div'));
 }
 
 // If webcam supported, add event listener to button for when user
